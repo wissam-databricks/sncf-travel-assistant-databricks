@@ -1,6 +1,13 @@
 # SNCF Travel Assistant - Databricks App
 
+[![Databricks](https://img.shields.io/badge/Databricks-Apps-FF3621?logo=databricks)](https://docs.databricks.com/en/dev-tools/databricks-apps/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109.0-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Next.js](https://img.shields.io/badge/Next.js-14+-000000?logo=next.js)](https://nextjs.org/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Application de chatbot voyageur avec Agent AI et dashboard administrateur, déployée sur Databricks Apps.
+
+🔗 **Repository**: https://github.com/wissam-databricks/sncf-travel-assistant-databricks
 
 ## 📁 Structure du Projet
 
