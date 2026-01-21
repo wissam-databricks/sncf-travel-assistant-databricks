@@ -1,0 +1,205 @@
+# Databricks Asset Bundle Configuration
+# Documentation: https://docs.databricks.com/en/dev-tools/bundles/index.html
+
+bundle:
+  name: sncf_travel_assistant
+
+# Variables partagées
+variables:
+  catalog:
+    description: "Unity Catalog pour stocker les données"
+    default: "sncf_prod"
+  
+  schema:
+    description: "Schema pour les tables de l'application"
+    default: "travel_assistant"
+
+# Inclusion de fichiers de configuration supplémentaires (optionnel)
+include:
+  - resources/*.yml
+
+# Définition des ressources Databricks
+resources:
+  # Application Databricks
+  apps:
+    sncf_travel_app:
+      name: "sncf-travel-assistant"
+      description: "Application SNCF Travel Assistant - Chatbot voyageur avec Agent AI et dashboard administrateur"
+      
+      # Chemin source contenant le code de l'application
+      source_code_path: .
+      
+      # Configuration de l'app (référence au fichier app.yaml)
+      config:
+        command: ["uvicorn", "backend.server:app", "--host", "0.0.0.0", "--port", "8000"]
+        
+        env:
+          - name: AGENT_ENDPOINT_URL
+            value: "https://${workspace.host}/serving-endpoints/sncf-travel-agent/invocations"
+          
+          - name: DATABRICKS_TOKEN
+            value: "{{secrets/sncf-travel-app/databricks-token}}"
+          
+          - name: WORKSPACE_URL
+            value: "https://${workspace.host}"
+          
+          - name: PORT
+            value: "8000"
+          
+          - name: HOST
+            value: "0.0.0.0"
+        
+        # Ressources utilisées par l'app
+        resources:
+          - name: travel_agent_endpoint
+            description: "Model serving endpoint pour l'agent AI"
+            permission: CAN_QUERY
+  
+  # Model Serving Endpoint (si vous déployez l'agent via le bundle)
+  model_serving_endpoints:
+    sncf_travel_agent:
+      name: "sncf-travel-agent"
+      config:
+        served_entities:
+          - name: "travel_agent_model"
+            entity_name: "${var.catalog}.${var.schema}.sncf_agent"
+            entity_version: "1"
+            workload_size: "Small"
+            scale_to_zero_enabled: true
+        
+        # Configuration du traffic routing
+        traffic_config:
+          routes:
+            - served_model_name: "travel_agent_model"
+              traffic_percentage: 100
+  
+  # Jobs (optionnel - pour pipeline de données, training, etc.)
+  jobs:
+    # Exemple : job pour calculer les analytics quotidiennes
+    analytics_pipeline:
+      name: "sncf-analytics-daily"
+      
+      tasks:
+        - task_key: "compute_kpis"
+          notebook_task:
+            notebook_path: "./notebooks/compute_daily_kpis.py"
+            source: WORKSPACE
+          
+          new_cluster:
+            spark_version: "14.3.x-scala2.12"
+            node_type_id: "i3.xlarge"
+            num_workers: 2
+        
+        - task_key: "update_dashboard"
+          depends_on:
+            - task_key: "compute_kpis"
+          
+          notebook_task:
+            notebook_path: "./notebooks/update_dashboard_data.py"
+            source: WORKSPACE
+          
+          new_cluster:
+            spark_version: "14.3.x-scala2.12"
+            node_type_id: "i3.xlarge"
+            num_workers: 1
+      
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"  # Tous les jours à 2h du matin
+        timezone_id: "Europe/Paris"
+
+# Targets (environnements de déploiement)
+targets:
+  # Environnement de développement
+  dev:
+    mode: development
+    
+    workspace:
+      host: https://<workspace-url>.cloud.databricks.com
+      # Option 1: Authentification utilisateur
+      # current_user:
+      #   user_name: user@example.com
+      
+      # Option 2: Service Principal (recommandé pour CI/CD)
+      # root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    
+    variables:
+      catalog: "sncf_dev"
+      schema: "travel_assistant_dev"
+    
+    resources:
+      apps:
+        sncf_travel_app:
+          name: "sncf-travel-assistant-dev"
+          description: "[DEV] Application SNCF Travel Assistant"
+      
+      model_serving_endpoints:
+        sncf_travel_agent:
+          name: "sncf-travel-agent-dev"
+  
+  # Environnement de staging
+  staging:
+    mode: production
+    
+    workspace:
+      host: https://<workspace-url>.cloud.databricks.com
+      # Utiliser un service principal pour staging/prod
+      # root_path: /Workspace/.bundle/${bundle.name}/${bundle.target}
+    
+    variables:
+      catalog: "sncf_staging"
+      schema: "travel_assistant"
+    
+    resources:
+      apps:
+        sncf_travel_app:
+          name: "sncf-travel-assistant-staging"
+          
+          # Ressources plus importantes en staging
+          config:
+            env:
+              - name: AGENT_ENDPOINT_URL
+                value: "https://${workspace.host}/serving-endpoints/sncf-travel-agent-staging/invocations"
+      
+      model_serving_endpoints:
+        sncf_travel_agent:
+          name: "sncf-travel-agent-staging"
+          config:
+            served_entities:
+              - workload_size: "Medium"  # Plus de ressources en staging
+  
+  # Environnement de production
+  prod:
+    mode: production
+    
+    workspace:
+      host: https://<workspace-url>.cloud.databricks.com
+      # Service principal obligatoire en production
+      # root_path: /Workspace/.bundle/${bundle.name}/${bundle.target}
+    
+    variables:
+      catalog: "sncf_prod"
+      schema: "travel_assistant"
+    
+    resources:
+      apps:
+        sncf_travel_app:
+          name: "sncf-travel-assistant"
+          
+          config:
+            env:
+              - name: AGENT_ENDPOINT_URL
+                value: "https://${workspace.host}/serving-endpoints/sncf-travel-agent-prod/invocations"
+      
+      model_serving_endpoints:
+        sncf_travel_agent:
+          name: "sncf-travel-agent-prod"
+          config:
+            served_entities:
+              - workload_size: "Large"  # Ressources maximales en production
+                scale_to_zero_enabled: false  # Toujours actif en prod
+      
+      jobs:
+        analytics_pipeline:
+          # Job tournant plus fréquemment en prod
+          schedule:
+            quartz_cron_expression: "0 0 * * * ?"  # Toutes les heures

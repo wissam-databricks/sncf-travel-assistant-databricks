@@ -1,0 +1,46 @@
+# Databricks App Configuration
+# Documentation: https://docs.databricks.com/en/dev-tools/databricks-apps/index.html
+
+# Commande pour démarrer l'application
+command: ["uvicorn", "backend.server:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Variables d'environnement nécessaires
+env:
+  # URL de l'endpoint Agent AI / Model Serving Databricks
+  - name: AGENT_ENDPOINT_URL
+    value: "https://<workspace-url>/serving-endpoints/<endpoint-name>/invocations"
+  
+  # Token Databricks pour l'authentification (généré automatiquement dans Databricks Apps)
+  - name: DATABRICKS_TOKEN
+    value: "{{secrets/sncf-travel-app/databricks-token}}"
+  
+  # URL du workspace Databricks
+  - name: WORKSPACE_URL
+    value: "https://<workspace-url>"
+  
+  # Port de l'application (optionnel, défaut: 8000)
+  - name: PORT
+    value: "8000"
+  
+  # Host binding (pour Databricks Apps, utiliser 0.0.0.0)
+  - name: HOST
+    value: "0.0.0.0"
+
+# Configuration des ressources (optionnel)
+# resources:
+#   # Warehouse SQL pour les requêtes analytics
+#   - name: ANALYTICS_WAREHOUSE
+#     type: warehouse
+#     id: "<warehouse-id>"
+#   
+#   # Volume pour stocker des fichiers si nécessaire
+#   - name: APP_VOLUME
+#     type: volume
+#     path: "/Volumes/<catalog>/<schema>/<volume-name>"
+
+# Configuration du healthcheck (optionnel)
+# Databricks Apps vérifie automatiquement la santé de l'app
+# health_check:
+#   path: "/health"
+#   interval: 30
+#   timeout: 5
