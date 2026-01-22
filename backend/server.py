@@ -249,17 +249,47 @@ async def get_analytics():
 
 # ==================== Servir le Frontend ====================
 
-# Monter le dossier des assets statiques Next.js (après build)
-# Le frontend Next.js doit être buildé en mode standalone ou export
-frontend_build_path = os.path.join(os.path.dirname(__file__), "..", "frontend", "out")
+# Chercher le dossier frontend/out dans plusieurs emplacements possibles
+def find_frontend_build_path():
+    """Trouver le chemin du build frontend"""
+    possible_paths = [
+        os.path.join(os.path.dirname(__file__), "..", "frontend", "out"),  # Développement local
+        os.path.join(os.getcwd(), "frontend", "out"),  # Databricks Apps
+        os.path.join("/Workspace", "frontend", "out"),  # Databricks Workspace
+        "./frontend/out",  # Chemin relatif
+    ]
+    
+    for path in possible_paths:
+        abs_path = os.path.abspath(path)
+        print(f"Checking frontend path: {abs_path}")
+        if os.path.exists(abs_path):
+            print(f"✓ Frontend found at: {abs_path}")
+            return abs_path
+    
+    print("✗ Frontend build not found in any location")
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Script directory: {os.path.dirname(__file__)}")
+    return None
 
-if os.path.exists(frontend_build_path):
+frontend_build_path = find_frontend_build_path()
+
+if frontend_build_path and os.path.exists(frontend_build_path):
     # Si Next.js est exporté en static (next export ou output: 'export')
-    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_build_path, "_next")), name="static")
+    print(f"Mounting static files from: {frontend_build_path}")
+    
+    # Monter les assets _next
+    next_path = os.path.join(frontend_build_path, "_next")
+    if os.path.exists(next_path):
+        app.mount("/_next", StaticFiles(directory=next_path), name="next_static")
+        print(f"✓ Mounted /_next from {next_path}")
     
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
         """Servir le frontend Next.js statique"""
+        # Ne pas intercepter les routes API
+        if full_path.startswith("api/") or full_path == "docs" or full_path == "openapi.json":
+            raise HTTPException(status_code=404)
+        
         # Essayer de servir le fichier demandé
         file_path = os.path.join(frontend_build_path, full_path)
         
@@ -272,6 +302,12 @@ if os.path.exists(frontend_build_path):
         if os.path.isfile(html_path):
             return FileResponse(html_path)
         
+        # Pour les routes vides ou racine
+        if not full_path or full_path == "/":
+            index_path = os.path.join(frontend_build_path, "index.html")
+            if os.path.isfile(index_path):
+                return FileResponse(index_path)
+        
         # Par défaut, servir index.html (pour le routing SPA)
         index_path = os.path.join(frontend_build_path, "index.html")
         if os.path.isfile(index_path):
@@ -279,13 +315,18 @@ if os.path.exists(frontend_build_path):
         
         raise HTTPException(status_code=404, detail="Page not found")
 else:
+    print("⚠️  Frontend not available - API only mode")
+    
     @app.get("/")
     async def root():
         return {
             "message": "SNCF Travel Assistant API",
             "status": "running",
             "docs": "/docs",
-            "note": "Frontend build not found. Please build Next.js app first: cd frontend && npm run build"
+            "frontend_status": "not_built",
+            "note": "Frontend build not found. The API is running in API-only mode.",
+            "cwd": os.getcwd(),
+            "script_dir": os.path.dirname(__file__)
         }
 
 if __name__ == "__main__":
