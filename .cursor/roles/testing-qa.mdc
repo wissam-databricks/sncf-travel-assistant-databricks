@@ -1,0 +1,610 @@
+---
+description: "Testing, Quality Assurance, and Development Best Practices"
+globs: server/tests/**/*.py, client/src/**/*.test.ts, client/src/**/*.spec.ts
+---
+
+# Testing & Quality Assurance
+
+You are an expert in testing strategies, test-driven development, and code quality practices for full-stack applications.
+
+## Backend Testing Strategy
+
+### Unit Tests (Fast, Mocked)
+
+**Purpose:** Test individual functions in isolation with mocked dependencies
+
+```python
+# tests/unit/test_dataset_service.py
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+from app.services.dataset_service import (
+    create_dataset, get_dataset, update_dataset, delete_dataset
+)
+from app.schemas import DatasetCreate, DatasetUpdate
+from app.models import Dataset
+from sqlalchemy.ext.asyncio import AsyncSession
+
+@pytest.fixture
+def mock_db():
+    """Mock AsyncSession for database operations."""
+    return AsyncMock(spec=AsyncSession)
+
+@pytest.fixture
+def sample_dataset_create():
+    """Sample dataset creation payload."""
+    return DatasetCreate(
+        name="test_dataset",
+        description="Test description",
+        source_schema="my_schema",
+        source_table="my_table",
+        category="test",
+    )
+
+@pytest.mark.asyncio
+async def test_create_dataset(mock_db, sample_dataset_create):
+    """Test creating a new dataset."""
+    # Arrange
+    mock_db.execute.return_value.scalar_one_or_none.return_value = None
+    
+    # Act
+    result = await create_dataset(sample_dataset_create, mock_db)
+    
+    # Assert
+    assert result.name == "test_dataset"
+    mock_db.add.assert_called_once()
+    mock_db.commit.assert_called_once()
+    mock_db.refresh.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_create_dataset_duplicate_name(mock_db, sample_dataset_create):
+    """Test creating a dataset with duplicate name raises error."""
+    # Arrange - Mock existing dataset
+    existing = MagicMock(spec=Dataset)
+    existing.id = uuid4()
+    mock_db.execute.return_value.scalar_one_or_none.return_value = existing
+    
+    # Act & Assert
+    with pytest.raises(HTTPException) as exc_info:
+        await create_dataset(sample_dataset_create, mock_db)
+    
+    assert exc_info.value.status_code == 409
+    mock_db.add.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_get_dataset_not_found(mock_db):
+    """Test getting a non-existent dataset."""
+    # Arrange
+    dataset_id = uuid4()
+    mock_db.execute.return_value.scalar_one_or_none.return_value = None
+    
+    # Act & Assert
+    with pytest.raises(HTTPException) as exc_info:
+        await get_dataset(dataset_id, mock_db)
+    
+    assert exc_info.value.status_code == 404
+
+@pytest.mark.asyncio
+async def test_update_dataset(mock_db):
+    """Test updating dataset metadata."""
+    # Arrange
+    dataset_id = uuid4()
+    existing = MagicMock(spec=Dataset)
+    existing.id = dataset_id
+    existing.name = "original_name"
+    
+    mock_db.execute.return_value.scalar_one_or_none.return_value = existing
+    
+    update = DatasetUpdate(description="Updated description")
+    
+    # Act
+    result = await update_dataset(dataset_id, update, mock_db)
+    
+    # Assert
+    assert result.description == "Updated description"
+    mock_db.commit.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_delete_dataset(mock_db):
+    """Test soft-deleting a dataset."""
+    # Arrange
+    dataset_id = uuid4()
+    existing = MagicMock(spec=Dataset)
+    existing.is_deleted = False
+    
+    mock_db.execute.return_value.scalar_one_or_none.return_value = existing
+    
+    # Act
+    await delete_dataset(dataset_id, mock_db)
+    
+    # Assert
+    assert existing.is_deleted is True
+    mock_db.commit.assert_called_once()
+```
+
+### Integration Tests (Slower, Real Database)
+
+**Purpose:** Test API routes with real PostgreSQL database
+
+```python
+# tests/integration/test_dataset_routes.py
+import pytest
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+from app.main import app
+from app.models import Base, Dataset
+import uuid
+from datetime import datetime
+
+@pytest.fixture
+async def test_db():
+    """Create in-memory test database."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+    )
+    
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    
+    TestSessionLocal = sessionmaker(
+        engine, class_=AsyncSession, expire_on_commit=False
+    )
+    
+    async with TestSessionLocal() as session:
+        yield session
+    
+    await engine.dispose()
+
+@pytest.fixture
+async def client(test_db):
+    """Create test client with test database."""
+    async def override_get_db():
+        yield test_db
+    
+    app.dependency_overrides[get_db] = override_get_db
+    
+    async with AsyncClient(app=app, base_url="http://test") as ac:
+        yield ac
+    
+    app.dependency_overrides.clear()
+
+@pytest.mark.asyncio
+async def test_list_datasets_empty(client):
+    """Test listing datasets when none exist."""
+    response = await client.get("/api/v1/datasets/")
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["data"] == []
+    assert data["meta"]["pagination"]["total"] == 0
+
+@pytest.mark.asyncio
+async def test_create_dataset_success(client, test_db):
+    """Test successfully creating a dataset."""
+    payload = {
+        "name": "test_dataset",
+        "description": "Test dataset",
+        "source_schema": "my_schema",
+        "source_table": "my_table",
+        "category": "test",
+    }
+    
+    response = await client.post("/api/v1/datasets/", json=payload)
+    
+    assert response.status_code == 201
+    data = response.json()["data"]
+    assert data["name"] == "test_dataset"
+    assert data["id"] is not None
+
+@pytest.mark.asyncio
+async def test_get_dataset_success(client, test_db):
+    """Test retrieving a specific dataset."""
+    # First, create a dataset
+    dataset = Dataset(
+        id=uuid.uuid4(),
+        name="test_dataset",
+        description="Test",
+        source_schema="schema",
+        source_table="table",
+        category="test",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db.add(dataset)
+    await test_db.commit()
+    
+    # Retrieve it
+    response = await client.get(f"/api/v1/datasets/{dataset.id}")
+    
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["id"] == str(dataset.id)
+    assert data["name"] == "test_dataset"
+```
+
+### Databricks Integration Tests
+
+```python
+# tests/integration/test_databricks_integration.py
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from app.integrations.databricks_client import (
+    DatabricksClient, DatabricksError, DatabricksAuthError
+)
+
+@pytest.fixture
+def mock_workspace_client():
+    """Mock Databricks workspace client."""
+    mock = MagicMock()
+    
+    # Mock catalog list
+    mock_catalog = MagicMock()
+    mock_catalog.name = "main"
+    mock_catalog.owner = "admin"
+    mock_catalog.comment = "Default catalog"
+    
+    mock.catalogs.list.return_value = [mock_catalog]
+    
+    # Mock schema list
+    mock_schema = MagicMock()
+    mock_schema.name = "default"
+    mock_schema.catalog_name = "main"
+    
+    mock.schemas.list.return_value = [mock_schema]
+    
+    return mock
+
+@pytest.mark.asyncio
+async def test_list_catalogs_success(mock_workspace_client):
+    """Test listing catalogs."""
+    client = DatabricksClient(mock_workspace_client)
+    
+    catalogs = await client.list_catalogs()
+    
+    assert len(catalogs) == 1
+    assert catalogs[0]["name"] == "main"
+    assert catalogs[0]["owner"] == "admin"
+
+@pytest.mark.asyncio
+async def test_list_catalogs_caching(mock_workspace_client):
+    """Test that catalog results are cached."""
+    client = DatabricksClient(mock_workspace_client)
+    
+    # First call
+    result1 = await client.list_catalogs()
+    
+    # Second call (should use cache)
+    result2 = await client.list_catalogs()
+    
+    # Should only call SDK once (cached on second call)
+    assert mock_workspace_client.catalogs.list.call_count == 1
+    assert result1 == result2
+
+@pytest.mark.asyncio
+async def test_list_catalogs_auth_error(mock_workspace_client):
+    """Test handling of authentication errors."""
+    mock_workspace_client.catalogs.list.side_effect = Exception("401 Unauthorized")
+    
+    client = DatabricksClient(mock_workspace_client)
+    
+    with pytest.raises(DatabricksAuthError):
+        await client.list_catalogs()
+```
+
+## Frontend Testing
+
+### Component Unit Tests
+
+```typescript
+// src/__tests__/components/DatasetCard.test.tsx
+import { render, screen, fireEvent } from "@testing-library/react"
+import { DatasetCard, DatasetCardProps } from "@/components/DatasetCard"
+
+describe("DatasetCard", () => {
+  const defaultProps: DatasetCardProps = {
+    id: "test-id",
+    name: "Test Dataset",
+    description: "A test dataset",
+    tableCount: 5,
+    isStarred: false,
+  }
+
+  it("renders dataset information", () => {
+    render(<DatasetCard {...defaultProps} />)
+
+    expect(screen.getByText("Test Dataset")).toBeInTheDocument()
+    expect(screen.getByText("A test dataset")).toBeInTheDocument()
+    expect(screen.getByText("5 tables")).toBeInTheDocument()
+  })
+
+  it("calls onStar when star button is clicked", () => {
+    const onStar = jest.fn()
+    render(<DatasetCard {...defaultProps} onStar={onStar} />)
+
+    const starButton = screen.getByRole("button", { name: /star/i })
+    fireEvent.click(starButton)
+
+    expect(onStar).toHaveBeenCalledWith("test-id")
+  })
+
+  it("shows filled star when isStarred is true", () => {
+    render(<DatasetCard {...defaultProps} isStarred={true} />)
+
+    const starButton = screen.getByRole("button", { name: /unstar/i })
+    expect(starButton).toHaveClass("text-yellow-400")
+  })
+})
+```
+
+### Hook Tests
+
+```typescript
+// src/__tests__/hooks/useDatasets.test.ts
+import { renderHook, waitFor } from "@testing-library/react"
+import { useDatasets } from "@/hooks/useDatasets"
+import * as apiModule from "@/api/client"
+
+jest.mock("@/api/client")
+
+describe("useDatasets", () => {
+  it("fetches datasets on mount", async () => {
+    const mockDatasets = [
+      { id: "1", name: "Dataset 1", description: "First dataset", tableCount: 3 },
+      { id: "2", name: "Dataset 2", description: "Second dataset", tableCount: 5 },
+    ]
+
+    ;(apiModule.apiClient.get as jest.Mock).mockResolvedValue({
+      data: mockDatasets,
+    })
+
+    const { result } = renderHook(() => useDatasets())
+
+    // Initially loading
+    expect(result.current.isLoading).toBe(true)
+    expect(result.current.datasets).toEqual([])
+
+    // After fetch completes
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false)
+    })
+
+    expect(result.current.datasets).toEqual(mockDatasets)
+    expect(result.current.error).toBeNull()
+  })
+
+  it("handles API errors gracefully", async () => {
+    const mockError = new Error("API Error")
+    ;(apiModule.apiClient.get as jest.Mock).mockRejectedValue(mockError)
+
+    const { result } = renderHook(() => useDatasets())
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false)
+    })
+
+    expect(result.current.error).toEqual(mockError)
+    expect(result.current.datasets).toEqual([])
+  })
+})
+```
+
+## Test Configuration
+
+### pytest.ini (Backend)
+
+```ini
+[pytest]
+asyncio_mode = auto
+testpaths = tests
+python_files = test_*.py
+python_classes = Test*
+python_functions = test_*
+markers =
+    asyncio: marks tests as async (deselect with '-m "not asyncio"')
+    integration: marks tests as integration tests
+    slow: marks tests as slow (deselect with '-m "not slow"')
+addopts = 
+    -v
+    --strict-markers
+    --tb=short
+    --cov=app
+    --cov-report=term-missing
+    --cov-report=html
+    --cov-fail-under=80
+```
+
+### vitest.config.ts (Frontend)
+
+```typescript
+import { defineConfig } from "vitest/config"
+import react from "@vitejs/plugin-react"
+import path from "path"
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    globals: true,
+    environment: "jsdom",
+    setupFiles: "./src/__tests__/setup.ts",
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json", "html"],
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: ["src/**/*.test.{ts,tsx}", "src/**/__tests__/**"],
+      lines: 80,
+      functions: 80,
+      branches: 80,
+      statements: 80,
+    },
+  },
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
+  },
+})
+```
+
+## Running Tests
+
+### Backend
+
+```bash
+# Run all tests
+poetry run pytest
+
+# Run with coverage
+poetry run pytest --cov=app --cov-report=html
+
+# Run specific test file
+poetry run pytest tests/unit/test_dataset_service.py -v
+
+# Run only unit tests (fast)
+poetry run pytest tests/unit/ -m "not integration"
+
+# Run only integration tests
+poetry run pytest tests/integration/ -m integration
+
+# Run with specific marker
+poetry run pytest -m "not slow"
+
+# Run and watch for changes
+poetry run pytest-watch tests/ -- --tb=short
+```
+
+### Frontend
+
+```bash
+# Run all tests
+npm run test
+
+# Run with coverage
+npm run test -- --coverage
+
+# Run specific test file
+npm run test -- src/__tests__/components/DatasetCard.test.tsx
+
+# Watch mode
+npm run test -- --watch
+
+# Run only unit tests (not integration)
+npm run test -- --grep "^(?!.*integration)"
+```
+
+## CI/CD Integration
+
+### GitHub Actions Example
+
+```yaml
+# .github/workflows/test.yml
+name: Test & Quality
+
+on: [push, pull_request]
+
+jobs:
+  backend-test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v3
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.13"
+      
+      - name: Install poetry
+        run: pip install poetry
+      
+      - name: Install dependencies
+        run: cd backend && poetry install
+      
+      - name: Run tests
+        run: cd backend && poetry run pytest --cov=app
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost/test_db
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+
+  frontend-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+      
+      - name: Install dependencies
+        run: cd frontend && npm ci
+      
+      - name: Run tests
+        run: cd frontend && npm run test -- --coverage
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+```
+
+## Code Quality Tools
+
+### Python (Backend)
+
+```bash
+# Format code
+poetry run ruff format .
+
+# Lint code
+poetry run ruff check . --fix
+
+# Type checking
+poetry run mypy app/
+
+# Security check
+poetry run bandit -r app/
+
+# All checks
+poetry run pre-commit run --all-files
+```
+
+### TypeScript (Frontend)
+
+```bash
+# Format code
+npm run format
+
+# Lint code
+npm run lint -- --fix
+
+# Type checking
+npm run type-check
+
+# All checks
+npm run check
+```
+
+## Testing Best Practices
+
+1. **Test behavior, not implementation**: Test "what" not "how"
+2. **Use descriptive test names**: `test_create_dataset_with_duplicate_name_raises_409()`
+3. **AAA Pattern**: Arrange → Act → Assert
+4. **Mock external dependencies**: Database, APIs, file system
+5. **Test happy path and error cases**: Success + all error scenarios
+6. **Keep tests isolated**: No shared state between tests
+7. **Use fixtures**: Reduce test setup duplication
+8. **Test async code correctly**: Mark with `@pytest.mark.asyncio`
+9. **Measure coverage**: Target 80%+ for critical code
+10. **Fast feedback**: Unit tests < 100ms each, integration tests < 1s

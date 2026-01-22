@@ -1,0 +1,532 @@
+---
+description: "FastAPI Backend Development - Async, PostgreSQL, Databricks"
+globs: server/app/**/*.py,!server/tests/**,!server/app/integrations/**
+---
+
+# FastAPI Backend Best Practices
+
+You are an expert in Python 3.13, FastAPI, async/await, PostgreSQL with asyncpg, and scalable API development.
+
+## Key Principles
+
+- Write concise, technical Python code with accurate async patterns
+- Use functional, declarative programming; avoid unnecessary classes
+- Prefer async/await for all I/O operations (database, external APIs, file I/O)
+- Use type hints for all function signatures
+- Use Pydantic v2 models for validation
+- File structure: router definitions, service functions, utilities, types (schemas)
+- Use descriptive variable names with auxiliary verbs (e.g., `is_active`, `has_permission`, `should_cache`)
+
+## Python/FastAPI Coding Standards
+
+### Async/Await Patterns
+
+**Every I/O operation must be async:**
+
+```python
+# ✅ CORRECT - async for database calls
+async def get_datasets(db: AsyncSession) -> list[DatasetSchema]:
+    result = await db.execute(select(Dataset))
+    return result.scalars().all()
+
+# ❌ WRONG - blocking I/O in async function
+async def get_datasets(db: AsyncSession) -> list[DatasetSchema]:
+    return db.query(Dataset).all()  # This blocks the event loop!
+```
+
+**Use `async def` for:**
+- All route handlers
+- Database queries (execute, fetch, commit)
+- External API calls (Databricks SDK, HTTP requests)
+- Any I/O-bound operation
+
+**Use regular `def` for:**
+- Pure computation functions
+- Data transformations
+- Validation helpers
+- Business logic without I/O
+
+### Function Signatures & Type Hints
+
+```python
+# ✅ CORRECT - full type hints, async for I/O
+async def create_dataset(
+    schema: DatasetCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> DatasetResponse:
+    """Create a new dataset.
+    
+    Args:
+        schema: Dataset creation payload
+        db: Database session (injected)
+        user: Current authenticated user (injected)
+        
+    Returns:
+        DatasetResponse: Created dataset details
+        
+    Raises:
+        HTTPException: If dataset name already exists
+    """
+    existing = await db.execute(
+        select(Dataset).where(Dataset.name == schema.name)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Dataset name already exists")
+    
+    dataset = Dataset(**schema.dict())
+    db.add(dataset)
+    await db.commit()
+    await db.refresh(dataset)
+    return DatasetResponse.from_orm(dataset)
+```
+
+### Error Handling Pattern
+
+Follow the **Guard Clause** pattern: validate preconditions early, return early on errors, happy path last.
+
+```python
+# ✅ CORRECT - guard clauses, early returns
+async def update_dataset(
+    dataset_id: UUID,
+    update: DatasetUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> DatasetResponse:
+    # Guard: validate input
+    if not dataset_id:
+        raise HTTPException(status_code=400, detail="Invalid dataset ID")
+    
+    # Guard: check resource exists
+    result = await db.execute(select(Dataset).where(Dataset.id == dataset_id))
+    dataset = result.scalar_one_or_none()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    # Guard: check permission (in services)
+    # if not can_update_dataset(user, dataset):
+    #     raise HTTPException(status_code=403, detail="Permission denied")
+    
+    # Happy path: update and return
+    for field, value in update.dict(exclude_unset=True).items():
+        setattr(dataset, field, value)
+    
+    await db.commit()
+    await db.refresh(dataset)
+    return DatasetResponse.from_orm(dataset)
+```
+
+## Project Structure & Organization
+
+### Routers (API endpoints)
+
+**File:** `app/api/routes/datasets.py`
+
+```python
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.schemas import DatasetCreate, DatasetResponse, DatasetUpdate
+from app.services import dataset_service
+from app.database import get_db
+
+router = APIRouter(prefix="/datasets", tags=["datasets"])
+
+@router.get("/", response_model=list[DatasetResponse])
+async def list_datasets(
+    skip: int = 0,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+) -> list[DatasetResponse]:
+    """List all available datasets with pagination."""
+    return await dataset_service.list_datasets(db, skip, limit)
+
+@router.post("/", response_model=DatasetResponse, status_code=201)
+async def create_dataset(
+    schema: DatasetCreate,
+    db: AsyncSession = Depends(get_db),
+) -> DatasetResponse:
+    """Create a new dataset."""
+    return await dataset_service.create_dataset(schema, db)
+
+@router.get("/{dataset_id}", response_model=DatasetResponse)
+async def get_dataset(
+    dataset_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> DatasetResponse:
+    """Get dataset details by ID."""
+    return await dataset_service.get_dataset(dataset_id, db)
+
+@router.patch("/{dataset_id}", response_model=DatasetResponse)
+async def update_dataset(
+    dataset_id: UUID,
+    update: DatasetUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> DatasetResponse:
+    """Update dataset metadata."""
+    return await dataset_service.update_dataset(dataset_id, update, db)
+
+@router.delete("/{dataset_id}", status_code=204)
+async def delete_dataset(
+    dataset_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Delete a dataset."""
+    await dataset_service.delete_dataset(dataset_id, db)
+```
+
+### Services (Business Logic)
+
+**File:** `app/services/dataset_service.py`
+
+```python
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.models import Dataset
+from app.schemas import DatasetCreate, DatasetResponse, DatasetUpdate
+
+async def list_datasets(
+    db: AsyncSession,
+    skip: int = 0,
+    limit: int = 20,
+) -> list[Dataset]:
+    """Fetch paginated list of datasets."""
+    result = await db.execute(
+        select(Dataset)
+        .where(Dataset.is_deleted == False)
+        .offset(skip)
+        .limit(limit)
+    )
+    return result.scalars().all()
+
+async def create_dataset(schema: DatasetCreate, db: AsyncSession) -> Dataset:
+    """Create new dataset with validation."""
+    dataset = Dataset(**schema.dict())
+    db.add(dataset)
+    await db.commit()
+    await db.refresh(dataset)
+    return dataset
+
+async def get_dataset(dataset_id: UUID, db: AsyncSession) -> Dataset:
+    """Fetch single dataset by ID."""
+    result = await db.execute(
+        select(Dataset).where(Dataset.id == dataset_id)
+    )
+    dataset = result.scalar_one_or_none()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return dataset
+
+async def update_dataset(
+    dataset_id: UUID,
+    update: DatasetUpdate,
+    db: AsyncSession,
+) -> Dataset:
+    """Update dataset and return updated record."""
+    dataset = await get_dataset(dataset_id, db)
+    
+    for field, value in update.dict(exclude_unset=True).items():
+        setattr(dataset, field, value)
+    
+    await db.commit()
+    await db.refresh(dataset)
+    return dataset
+
+async def delete_dataset(dataset_id: UUID, db: AsyncSession) -> None:
+    """Soft delete dataset (set is_deleted flag)."""
+    dataset = await get_dataset(dataset_id, db)
+    dataset.is_deleted = True
+    await db.commit()
+```
+
+### Schemas (Pydantic Models)
+
+**File:** `app/schemas.py`
+
+```python
+from pydantic import BaseModel, Field
+from datetime import datetime
+from uuid import UUID
+
+class DatasetCreate(BaseModel):
+    """Request model for creating a dataset."""
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str = Field(default="")
+    source_schema: str = Field(..., description="Databricks schema name")
+    source_table: str = Field(..., description="Databricks table name")
+    category: str = Field(default="general")
+
+class DatasetUpdate(BaseModel):
+    """Request model for updating dataset metadata."""
+    description: str | None = None
+    category: str | None = None
+
+class DatasetResponse(BaseModel):
+    """Response model for dataset."""
+    id: UUID
+    name: str
+    description: str
+    source_schema: str
+    source_table: str
+    category: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True  # Pydantic v2: read from ORM objects
+```
+
+### Models (SQLAlchemy)
+
+**File:** `app/models.py`
+
+```python
+from sqlalchemy import Column, String, DateTime, Boolean
+from sqlalchemy.orm import declarative_base
+from sqlalchemy.dialects.postgresql import UUID
+import uuid
+from datetime import datetime
+
+Base = declarative_base()
+
+class Dataset(Base):
+    """ORM model for datasets."""
+    __tablename__ = "datasets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(255), nullable=False, unique=True, index=True)
+    description = Column(String, default="")
+    source_schema = Column(String(255), nullable=False)
+    source_table = Column(String(255), nullable=False)
+    category = Column(String(100), default="general", index=True)
+    is_deleted = Column(Boolean, default=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<Dataset id={self.id}, name='{self.name}'>"
+```
+
+## Database Connection Management
+
+**File:** `app/database.py`
+
+```python
+import os
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.pool import NullPool
+from app.models import Base
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://user:password@localhost:5432/marketplace"
+)
+
+# Connection pool configuration
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,  # Set True for SQL logging in development
+    pool_size=20,  # Connection pool size
+    max_overflow=10,  # Additional connections when pool exhausted
+    pool_pre_ping=True,  # Check connection health before use
+    pool_recycle=3600,  # Recycle connections after 1 hour
+)
+
+AsyncSessionLocal = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,  # Keep objects after commit
+)
+
+async def get_db() -> AsyncSession:
+    """Dependency for injecting database session into routes."""
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+
+async def init_db() -> None:
+    """Initialize database schema (run once at startup)."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+async def close_db() -> None:
+    """Close database connection pool (run at shutdown)."""
+    await engine.dispose()
+```
+
+## FastAPI Application Setup
+
+**File:** `app/main.py`
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from app.database import init_db, close_db
+from app.core.config import settings
+from app.api import routes  # Import router groups
+import logging
+
+logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage startup and shutdown events."""
+    # Startup
+    logger.info("Starting application...")
+    await init_db()
+    yield
+    # Shutdown
+    logger.info("Shutting down application...")
+    await close_db()
+
+# Create FastAPI app
+app = FastAPI(
+    title="Data Marketplace API",
+    description="API for discovering and managing Databricks datasets",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Trusted host middleware
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=settings.ALLOWED_HOSTS,
+)
+
+# Include routers
+app.include_router(routes.datasets.router, prefix="/api/v1")
+
+@app.get("/health", tags=["health"])
+async def health_check() -> dict[str, str]:
+    """Health check endpoint for load balancers."""
+    return {"status": "healthy"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+```
+
+## Middleware & Logging
+
+**Structured logging example:**
+
+```python
+import logging
+import time
+from fastapi import Request
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log HTTP requests and responses."""
+    start_time = time.time()
+    
+    response = await call_next(request)
+    
+    duration = time.time() - start_time
+    
+    logger.info(
+        f"{request.method} {request.url.path}",
+        extra={
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": round(duration * 1000),
+            "client": request.client.host if request.client else "unknown",
+        }
+    )
+    
+    return response
+```
+
+## Testing Patterns
+
+**Unit test example (mock database):**
+
+```python
+# tests/unit/test_dataset_service.py
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+from app.services import dataset_service
+from app.schemas import DatasetCreate
+
+@pytest.mark.asyncio
+async def test_create_dataset():
+    """Test creating a dataset."""
+    mock_db = AsyncMock()
+    
+    schema = DatasetCreate(
+        name="test_dataset",
+        source_schema="my_schema",
+        source_table="my_table",
+    )
+    
+    result = await dataset_service.create_dataset(schema, mock_db)
+    
+    assert result.name == "test_dataset"
+    mock_db.add.assert_called_once()
+    mock_db.commit.assert_called_once()
+```
+
+## Performance & Optimization
+
+- **Connection Pooling**: Reuse database connections via `pool_size` and `max_overflow`
+- **Query Optimization**: Use `.select()` with specific columns, join strategically
+- **Caching**: Use `lru_cache` for pure functions, cache expensive Databricks API calls
+- **Pagination**: Always paginate list endpoints (default 20, max 100)
+- **Indexes**: Index frequently queried columns (id, category, created_at)
+- **Lazy Loading**: Avoid N+1 queries with SQLAlchemy joins
+
+## Dependency Injection
+
+Use FastAPI's `Depends()` for all shared resources:
+
+```python
+async def get_current_user(
+    token: str = Header(...),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Extract and validate user from JWT token."""
+    user_id = validate_jwt(token)
+    return await get_user(user_id, db)
+
+@app.post("/datasets", response_model=DatasetResponse)
+async def create_dataset(
+    schema: DatasetCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> DatasetResponse:
+    """Both db session and user are injected."""
+    return await dataset_service.create_dataset(schema, db, user)
+```
+
+## Naming Conventions
+
+- **Files**: Lowercase with underscores (`dataset_service.py`)
+- **Functions/Variables**: Lowercase snake_case (`get_dataset()`, `is_active`)
+- **Classes/Models**: PascalCase (`Dataset`, `DatasetCreate`)
+- **Constants**: UPPERCASE (`MAX_PAGE_SIZE = 100`)
+- **Private functions**: Prefix with underscore (`_validate_schema()`)
+
+## Error Handling & Validation
+
+All validation errors return 422 (Pydantic automatic), business logic errors return:
+- 400: Bad request (invalid data after validation)
+- 401: Unauthorized (authentication failed)
+- 403: Forbidden (permission denied)
+- 404: Not found
+- 409: Conflict (e.g., duplicate name)
+- 500: Server error (only unexpected exceptions)

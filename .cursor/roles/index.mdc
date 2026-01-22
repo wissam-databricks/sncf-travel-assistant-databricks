@@ -1,0 +1,234 @@
+---
+description: "ENGIE Dat Intelligence Marketplace - General Guidance"
+rules-type: "always"
+---
+
+# Data Marketplace Platform - Core Project Guidelines
+
+## Project Overview
+
+A production-ready data marketplace application enabling users to discover, analyze, and purchase datasets from Databricks. The platform features a modern React frontend, a scalable FastAPI backend, and seamless Databricks integration.
+
+## Technology Stack
+
+### Frontend
+- **Framework**: React 18 + TypeScript
+- **Build Tool**: Vite
+- **Styling**: Tailwind CSS v4
+- **Charts**: Recharts
+- **State Management**: React Context / TanStack Query (if needed)
+- **Routing**: React Router (optional, if multi-page)
+
+### Backend
+- **Language**: Python 3.13
+- **Framework**: FastAPI + Uvicorn
+- **Database**: PostgreSQL (async via asyncpg)
+- **ORM**: SQLAlchemy 2.0 (async)
+- **Data Validation**: Pydantic v2
+- **Async Runtime**: asyncio
+
+### External Integrations
+- **Databricks SDK**: For workspace orchestration & Unity Catalog access
+- **Lakebase**: PostgreSQL instance synced from Databricks
+- **OAuth2**: Databricks workspace authentication
+
+### Infrastructure & Deployment
+- **Containerization**: Docker
+- **Deployment Target**: Databricks Apps (serverless)
+- **Authentication**: OAuth2 (Databricks) + JWT (internal)
+
+## Architecture Principles
+
+### Clean Architecture (Ports & Adapters)
+```
+backend/
+├── app/
+│   ├── api/                    # HTTP layer (controllers/routes)
+│   ├── schemas/                # Pydantic request/response models
+│   ├── services/               # Business logic & orchestration
+│   ├── models/                 # SQLAlchemy ORM entities
+│   ├── integrations/           # External API clients (Databricks, etc.)
+│   ├── database/               # Database configuration & utilities
+│   ├── middleware/             # FastAPI middleware (auth, logging, etc.)
+│   ├── core/                   # Configuration, constants, enums
+│   └── main.py                 # FastAPI application entry point
+├── tests/
+│   ├── unit/                   # Unit tests (mocked dependencies)
+│   ├── integration/            # Integration tests (real DB, etc.)
+│   └── conftest.py             # Shared pytest fixtures
+└── pyproject.toml
+```
+
+### Key Patterns
+
+1. **Async-First**: All I/O operations (database, external APIs) use async/await
+2. **Dependency Injection**: FastAPI's `Depends()` for managing shared resources
+3. **Error Handling**: Guard clauses, early returns, structured error responses
+4. **Validation**: Pydantic models for all request/response data
+5. **Logging**: Structured logging with context tracking
+6. **Testing**: Unit tests with mocks, integration tests with real DB
+
+## Frontend Structure
+
+```
+frontend/
+├── src/
+│   ├── components/             # Reusable React components
+│   │   ├── common/             # Header, Footer, Navigation
+│   │   ├── datasets/           # Dataset-specific components
+│   │   └── charts/             # Recharts-based visualizations
+│   ├── pages/                  # Page-level components
+│   ├── hooks/                  # Custom React hooks
+│   ├── api/                    # API client functions (calls backend)
+│   ├── types/                  # TypeScript interfaces & types
+│   ├── utils/                  # Utility functions
+│   ├── styles/                 # Tailwind config & global styles
+│   └── main.tsx                # Vite entry point
+├── tailwind.config.ts
+├── vite.config.ts
+└── package.json
+```
+
+## Database Schema Pattern
+
+- All tables use UUID primary keys
+- Soft deletes for audit trails (is_deleted flag)
+- Timestamps: created_at, updated_at (UTC)
+- Foreign key constraints with CASCADE/RESTRICT rules
+- Indexes on frequently queried columns
+
+## API Conventions
+
+### URL Structure
+```
+/api/v1/{resource}     # GET (list), POST (create)
+/api/v1/{resource}/{id} # GET (detail), PATCH (update), DELETE
+```
+
+### Response Format
+```json
+{
+  "data": {...} or [...],
+  "meta": {
+    "pagination": {"total": 100, "page": 1, "page_size": 20}
+  },
+  "error": null
+}
+```
+
+### Error Response
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Human-readable message",
+    "details": {}
+  }
+}
+```
+
+## Databricks Integration Pattern
+
+- All Databricks calls go through `app/integrations/databricks_client.py`
+- Use OAuth2 (not legacy PATs) for authentication
+- Implement caching for workspace metadata (5-min TTL)
+- Log all API calls with request/response timings
+- Handle rate limits with exponential backoff
+
+## Deployment Pattern (Databricks Apps)
+
+### Deployment Configuration (`app.yaml`)
+```yaml
+name: data-marketplace
+title: "Data Marketplace"
+command:
+  - "uvicorn"
+  - "app.main:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+env:
+  - name: DATABASE_URL
+    valueFrom: db_connection_string
+resources:
+  compute:
+    resources:
+      cpu: "4"
+      memory: "4Gi"
+```
+
+### Frontend Deployment
+- Bundle React with Vite (`npm run build`)
+- Serve static files via FastAPI (`StaticFiles` middleware)
+- Fallback to index.html for SPA routing
+
+## Environment Configuration
+
+### Development (`.env.local`)
+```
+DATABASE_URL=postgresql+asyncpg://user:pass@localhost/marketplace
+DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
+DATABRICKS_PROFILE=databricks-profile
+LOG_LEVEL=DEBUG
+CORS_ORIGINS=http://localhost:5173
+```
+
+### Production (Databricks Apps + Secrets)
+- Use workspace secrets for sensitive data
+- OAuth2 for service-to-service calls
+- All HTTPS endpoints
+
+## Testing Strategy
+
+- **Unit Tests**: Mock Databricks & database calls
+- **Integration Tests**: Real PostgreSQL container (testcontainers)
+- **E2E Tests**: Playwright/Cypress for frontend
+- **Target Coverage**: 80%+ for critical paths
+
+## Performance Targets
+
+- **API Response Time**: <200ms p95 for list endpoints, <100ms p95 for detail
+- **Database Query Time**: <50ms p95 for simple queries
+- **Frontend Load Time**: <2s First Contentful Paint
+- **Concurrent Users**: 100+ simultaneous with 5-min caching
+
+## Security Considerations
+
+- ✅ OAuth2 for workspace authentication
+- ✅ JWT tokens for internal API calls (15 min expiry)
+- ✅ CORS configured for frontend domain
+- ✅ SQL injection prevention (parameterized queries via SQLAlchemy)
+- ✅ HTTPS only in production
+- ✅ Rate limiting on API endpoints
+- ✅ Input validation via Pydantic
+- ✅ Structured logging (no secrets in logs)
+
+## Development Workflow
+
+1. **Create feature branch**: `git checkout -b feature/marketplace-search`
+2. **Reference `.mdc` rules**: Cursor auto-loads rule context based on files edited
+3. **Run tests locally**: `pytest tests/` before committing
+4. **Format code**: `ruff check . && ruff format .`
+5. **Deploy to Databricks Apps**: Via Asset Bundles or manual `databricks apps deploy`
+
+## Key Files to Pin in Cursor
+
+When working on specific features, reference these files:
+
+- `@app/main.py` - FastAPI setup, middleware, lifespan
+- `@app/models.py` - All SQLAlchemy models (data contracts)
+- `@app/schemas.py` - All Pydantic schemas (API contracts)
+- `@app/integrations/databricks_client.py` - Databricks API wrapper
+- `@app/core/config.py` - Environment & application settings
+- `backend/pyproject.toml` - Dependencies & tools
+- `frontend/src/api/client.ts` - API client configuration
+- `frontend/src/types/index.ts` - Shared TypeScript types
+
+## References
+
+- [Databricks Apps Documentation](https://docs.databricks.com/en/dev-tools/databricks-apps/)
+- [Lakebase Sync Documentation](https://docs.databricks.com/en/products/lakebase/sync.html)
+- [FastAPI Best Practices](https://fastapi.tiangolo.com/deployment/concepts/#concepts)
+- [SQLAlchemy 2.0 Async](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)
+- [React 18 Patterns](https://react.dev/)

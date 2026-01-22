@@ -1,0 +1,78 @@
+---
+description: "Databricks Apps Deployment - Serverless, OAuth2, Asset Bundles"
+globs: app.yaml
+alwaysApply: false
+---
+# Databricks Apps Deployment & Configuration
+
+You are an expert in Databricks Apps, Asset Bundles, serverless deployment, and production data applications.
+
+## Databricks Apps Overview
+
+**What:** Serverless compute runtime on Databricks platform for running Python/Node.js applications
+**Where:** Deployed directly in workspace, integrated with Unity Catalog, Lakebase
+**Authentication:** OAuth2 (not legacy PATs)
+**Scaling:** Automatic, request-based
+**Cost:** Per-request pricing, no idle charges
+
+## Application Configuration (`app.yaml`)
+
+```yaml
+# app.yaml - Root deployment configuration for Databricks Apps
+name: data-marketplace
+title: "Data Marketplace"
+description: "Discover and manage Databricks datasets"
+
+command:
+  - "uvicorn"
+  - "app.main:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+# Environment variables (reference secrets via valueFrom)
+env:
+  - name: ENVIRONMENT
+    value: "production"
+  
+  - name: LOG_LEVEL
+    value: "INFO"
+  
+  - name: DATABRICKS_HOST
+    valueFrom: workspace_host  # Auto-injected by Databricks
+  
+  - name: DATABASE_URL
+    valueFrom: db_connection_string  # Reference app resource
+
+
+# Compute resource allocation
+resources:
+  compute:
+    resources:
+      cpu: "4"      # 4 CPU cores
+      memory: "4Gi" # 4GB memory
+
+# Expose the application on the internet
+expose_network_access: true
+
+# Lakebase PostgreSQL database connection
+# Synced from Unity Catalog tables
+database:
+  name: "marketplace"  # PostgreSQL database name
+
+# Secrets management (define in Databricks workspace)
+secrets:
+  - name: db_connection_string
+    scope: "data-marketplace"
+    key: "postgres_url"
+
+# Health check configuration
+health_check:
+  path: "/health"
+  timeout_seconds: 10
+  interval_seconds: 30
+
+# Timeout for requests (in seconds)
+timeout_seconds: 300
+```

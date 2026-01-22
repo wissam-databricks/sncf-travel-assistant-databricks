@@ -1,0 +1,587 @@
+---
+description: "Databricks API Integration - OAuth2, Workspace, Catalogs, Lakebase"
+globs: server/app/integrations/**/*.py,server/app/services/*databricks*.py
+---
+
+# Databricks Integration Guidelines
+
+You are an expert in Databricks SDK, workspace orchestration, Unity Catalog, Lakebase, and OAuth2 authentication patterns.
+
+## Authentication Pattern (OAuth2)
+
+**CRITICAL: Never use legacy Personal Access Tokens (PATs) in production. Always use OAuth2.**
+
+### Development Authentication (Local Machine)
+
+```python
+# app/core/config.py
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.core import Config
+
+class Settings:
+    """Application configuration with Databricks OAuth2."""
+    
+    @property
+    def databricks_client(self) -> WorkspaceClient:
+        """Initialize Databricks workspace client with OAuth2.
+        
+        For development, use Databricks CLI:
+            $ databricks auth login --host https://your-workspace.cloud.databricks.com --profile dev-profile
+        
+        This creates ~/.databricks/profiles at runtime for Cursor workspace access.
+        """
+        # Development: Use CLI-managed OAuth token
+        if os.getenv("ENV") == "development":
+            config = Config(profile=os.getenv("DATABRICKS_PROFILE", "DEFAULT"))
+            return WorkspaceClient(config=config)
+        
+        # Production (Databricks Apps): Use workspace-injected OAuth
+        return WorkspaceClient(
+            host=os.getenv("DATABRICKS_HOST"),
+            token=os.getenv("DATABRICKS_TOKEN"),  # OAuth token injected by Databricks Apps
+        )
+
+settings = Settings()
+```
+
+### Production Authentication (Databricks Apps)
+
+In `app.yaml`:
+```yaml
+command:
+  - "uvicorn"
+  - "app.main:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+env:
+  - name: DATABRICKS_HOST
+    valueFrom: workspace_host  # Auto-injected by Databricks
+  - name: DATABRICKS_TOKEN
+    valueFrom: oauth_token     # OAuth token auto-injected by Databricks
+```
+
+## Databricks Client Wrapper
+
+**File:** `app/integrations/databricks_client.py`
+
+All Databricks SDK calls must go through this centralized wrapper for:
+- Error handling & translation
+- Retry logic with exponential backoff
+- Request/response logging
+- Rate limit handling
+- OAuth token refresh
+
+```python
+import asyncio
+import logging
+from typing import Any, Optional
+from functools import wraps
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.compute import GetClusterResponse
+from databricks.sdk.service.catalog import (
+    GetCatalogResponse, GetSchemaResponse, GetTableResponse, ListTablesResponse
+)
+import time
+
+logger = logging.getLogger(__name__)
+
+class DatabricksError(Exception):
+    """Base exception for Databricks integration errors."""
+    pass
+
+class DatabricksAuthError(DatabricksError):
+    """OAuth token invalid or expired."""
+    pass
+
+class DatabricksNotFoundError(DatabricksError):
+    """Resource not found in Databricks workspace."""
+    pass
+
+class DatabricksRateLimitError(DatabricksError):
+    """API rate limit exceeded (429)."""
+    pass
+
+def retry_with_backoff(max_retries: int = 3, initial_delay: float = 1.0):
+    """Decorator for exponential backoff retry logic."""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            delay = initial_delay
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except DatabricksRateLimitError as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.warning(
+                        f"{func.__name__} rate limited, retrying in {delay}s "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(delay)
+                    delay *= 2  # Exponential backoff
+        return wrapper
+    return decorator
+
+class DatabricksClient:
+    """Centralized Databricks workspace client wrapper."""
+    
+    def __init__(self, workspace_client: WorkspaceClient):
+        """Initialize with workspace client."""
+        self.client = workspace_client
+        self._catalog_cache = {}  # Simple in-memory cache
+        self._cache_ttl = 300  # 5 minutes
+        self._cache_timestamps = {}
+    
+    def _is_cache_valid(self, key: str) -> bool:
+        """Check if cached data is still fresh."""
+        if key not in self._cache_timestamps:
+            return False
+        age = time.time() - self._cache_timestamps[key]
+        return age < self._cache_ttl
+    
+    async def list_catalogs(self) -> list[dict[str, Any]]:
+        """List all catalogs in workspace.
+        
+        Returns:
+            List of catalogs with metadata
+            
+        Raises:
+            DatabricksAuthError: If OAuth token is invalid
+            DatabricksError: If API call fails
+        """
+        cache_key = "catalogs"
+        if cache_key in self._catalog_cache and self._is_cache_valid(cache_key):
+            logger.info("Returning cached catalogs")
+            return self._catalog_cache[cache_key]
+        
+        try:
+            logger.info("Fetching catalogs from Databricks...")
+            start_time = time.time()
+            
+            catalogs = self.client.catalogs.list()
+            result = [
+                {
+                    "name": c.name,
+                    "owner": c.owner,
+                    "comment": c.comment or "",
+                    "created_at": c.created_at,
+                }
+                for c in catalogs
+            ]
+            
+            duration = time.time() - start_time
+            logger.info(f"Listed {len(result)} catalogs in {duration:.2f}s")
+            
+            # Cache result
+            self._catalog_cache[cache_key] = result
+            self._cache_timestamps[cache_key] = time.time()
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to list catalogs: {str(e)}", exc_info=True)
+            if "401" in str(e) or "Unauthorized" in str(e):
+                raise DatabricksAuthError(f"OAuth token invalid: {str(e)}")
+            raise DatabricksError(f"Failed to list catalogs: {str(e)}")
+    
+    async def list_schemas(self, catalog: str) -> list[dict[str, Any]]:
+        """List all schemas in a catalog.
+        
+        Args:
+            catalog: Catalog name (e.g., 'main')
+            
+        Returns:
+            List of schemas with metadata
+        """
+        cache_key = f"schemas:{catalog}"
+        if cache_key in self._catalog_cache and self._is_cache_valid(cache_key):
+            return self._catalog_cache[cache_key]
+        
+        try:
+            logger.info(f"Fetching schemas from catalog '{catalog}'...")
+            schemas = self.client.schemas.list(catalog_name=catalog)
+            result = [
+                {
+                    "name": s.name,
+                    "catalog": s.catalog_name,
+                    "owner": s.owner,
+                    "comment": s.comment or "",
+                }
+                for s in schemas
+            ]
+            
+            self._catalog_cache[cache_key] = result
+            self._cache_timestamps[cache_key] = time.time()
+            logger.info(f"Found {len(result)} schemas in catalog '{catalog}'")
+            
+            return result
+        except Exception as e:
+            logger.error(f"Failed to list schemas: {str(e)}", exc_info=True)
+            raise DatabricksError(f"Failed to list schemas in '{catalog}': {str(e)}")
+    
+    async def list_tables(
+        self,
+        catalog: str,
+        schema: str,
+        max_results: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List all tables in a schema.
+        
+        Args:
+            catalog: Catalog name
+            schema: Schema name
+            max_results: Maximum tables to return
+            
+        Returns:
+            List of table metadata
+        """
+        cache_key = f"tables:{catalog}.{schema}"
+        if cache_key in self._catalog_cache and self._is_cache_valid(cache_key):
+            return self._catalog_cache[cache_key]
+        
+        try:
+            logger.info(f"Fetching tables from {catalog}.{schema}...")
+            start_time = time.time()
+            
+            tables = self.client.tables.list(
+                catalog_name=catalog,
+                schema_name=schema,
+                max_results=max_results,
+            )
+            result = []
+            for table in tables:
+                result.append({
+                    "name": table.full_name,
+                    "type": table.table_type,
+                    "schema": table.schema_name,
+                    "owner": table.owner,
+                    "comment": table.comment or "",
+                    "created_at": table.created_time_ms,
+                    "rows": table.row_count or 0,
+                    "columns": len(table.columns) if table.columns else 0,
+                })
+            
+            duration = time.time() - start_time
+            logger.info(
+                f"Listed {len(result)} tables in {catalog}.{schema} "
+                f"(took {duration:.2f}s)"
+            )
+            
+            self._catalog_cache[cache_key] = result
+            self._cache_timestamps[cache_key] = time.time()
+            
+            return result
+        except Exception as e:
+            logger.error(
+                f"Failed to list tables in {catalog}.{schema}: {str(e)}",
+                exc_info=True
+            )
+            raise DatabricksError(
+                f"Failed to list tables in {catalog}.{schema}: {str(e)}"
+            )
+    
+    async def get_table_stats(
+        self,
+        catalog: str,
+        schema: str,
+        table: str,
+    ) -> dict[str, Any]:
+        """Get detailed table statistics for data exploration.
+        
+        Args:
+            catalog: Catalog name
+            schema: Schema name
+            table: Table name
+            
+        Returns:
+            Table statistics (row count, column info, etc.)
+        """
+        full_name = f"{catalog}.{schema}.{table}"
+        
+        try:
+            logger.info(f"Fetching statistics for table {full_name}...")
+            
+            table_info = self.client.tables.get(full_name)
+            
+            stats = {
+                "name": table_info.name,
+                "full_name": full_name,
+                "type": table_info.table_type,
+                "owner": table_info.owner,
+                "comment": table_info.comment or "",
+                "row_count": table_info.row_count or 0,
+                "size_bytes": table_info.storage_location,
+                "columns": [
+                    {
+                        "name": col.name,
+                        "type": col.type_text,
+                        "comment": col.comment or "",
+                    }
+                    for col in (table_info.columns or [])
+                ],
+                "created_at": table_info.created_time_ms,
+                "updated_at": table_info.updated_time_ms,
+            }
+            
+            logger.info(f"Retrieved stats for {full_name}: {stats['row_count']} rows")
+            return stats
+            
+        except Exception as e:
+            logger.error(
+                f"Failed to get table stats for {full_name}: {str(e)}",
+                exc_info=True
+            )
+            raise DatabricksError(f"Failed to get table stats: {str(e)}")
+    
+    async def execute_sql(
+        self,
+        warehouse_id: str,
+        sql: str,
+        timeout_seconds: int = 30,
+    ) -> list[dict[str, Any]]:
+        """Execute SQL query against Databricks SQL warehouse.
+        
+        Args:
+            warehouse_id: Databricks SQL warehouse ID
+            sql: SQL query to execute
+            timeout_seconds: Query timeout
+            
+        Returns:
+            Query results as list of dictionaries
+        """
+        try:
+            logger.info(f"Executing SQL query on warehouse {warehouse_id}...")
+            
+            # Use Databricks SQL API for query execution
+            # This is a simplified example; actual implementation may vary
+            result = self.client.sql.execute_statement(
+                warehouse_id=warehouse_id,
+                statement=sql,
+                timeout_seconds=timeout_seconds,
+            )
+            
+            # Convert result to list of dicts
+            rows = [dict(row) for row in result]
+            logger.info(f"Query returned {len(rows)} rows")
+            return rows
+            
+        except Exception as e:
+            logger.error(f"SQL query failed: {str(e)}", exc_info=True)
+            raise DatabricksError(f"SQL query execution failed: {str(e)}")
+    
+    def invalidate_cache(self, key: Optional[str] = None) -> None:
+        """Clear cache entries.
+        
+        Args:
+            key: Specific cache key to invalidate, or None to clear all
+        """
+        if key is None:
+            self._catalog_cache.clear()
+            self._cache_timestamps.clear()
+            logger.info("Cleared all Databricks cache")
+        elif key in self._catalog_cache:
+            del self._catalog_cache[key]
+            del self._cache_timestamps[key]
+            logger.info(f"Cleared cache for {key}")
+```
+
+## Integration in FastAPI Services
+
+**File:** `app/services/databricks_service.py`
+
+```python
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.integrations.databricks_client import DatabricksClient
+from app.core.config import settings
+from sqlalchemy import insert
+from app.models import AvailableDataset
+
+async def sync_available_datasets(db: AsyncSession) -> int:
+    """Sync available datasets from Databricks to local database.
+    
+    This discovers all tables accessible in Databricks workspace and
+    stores them in the marketplace for user discovery.
+    """
+    client = DatabricksClient(settings.databricks_client)
+    synced_count = 0
+    
+    try:
+        catalogs = await client.list_catalogs()
+        
+        for catalog in catalogs:
+            schemas = await client.list_schemas(catalog["name"])
+            
+            for schema in schemas:
+                tables = await client.list_tables(
+                    catalog["name"],
+                    schema["name"],
+                )
+                
+                for table in tables:
+                    # Upsert table into local database
+                    stmt = insert(AvailableDataset).values(
+                        catalog_name=catalog["name"],
+                        schema_name=schema["name"],
+                        table_name=table["name"],
+                        description=table.get("comment", ""),
+                        row_count=table.get("rows", 0),
+                    )
+                    
+                    # Use upsert pattern (on_conflict_do_update)
+                    await db.execute(stmt)
+                    synced_count += 1
+        
+        await db.commit()
+        logger.info(f"Synced {synced_count} datasets from Databricks")
+        return synced_count
+        
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Failed to sync datasets: {str(e)}", exc_info=True)
+        raise
+```
+
+## Error Handling Best Practices
+
+```python
+# Service layer: Handle Databricks errors gracefully
+async def get_dataset_preview(
+    catalog: str,
+    schema: str,
+    table: str,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Get preview of dataset (first N rows).
+    
+    Handles various failure scenarios with user-friendly errors.
+    """
+    client = DatabricksClient(settings.databricks_client)
+    
+    try:
+        # Guard: validate inputs
+        if not all([catalog, schema, table]):
+            raise ValueError("Catalog, schema, and table name required")
+        
+        # Try to fetch table stats first
+        stats = await client.get_table_stats(catalog, schema, table)
+        
+        # If table is small enough, fetch some rows for preview
+        if stats["row_count"] > 0 and stats["row_count"] <= limit * 10:
+            sql = f"SELECT * FROM `{catalog}`.`{schema}`.`{table}` LIMIT {limit}"
+            rows = await client.execute_sql(
+                warehouse_id=settings.WAREHOUSE_ID,
+                sql=sql,
+            )
+            return {
+                "stats": stats,
+                "preview": rows,
+                "preview_complete": len(rows) < limit * 10,
+            }
+        else:
+            # Return only stats for large tables
+            return {
+                "stats": stats,
+                "preview": [],
+                "preview_complete": False,
+                "message": "Table too large for preview; see stats instead",
+            }
+    
+    except DatabricksAuthError:
+        logger.error("OAuth token expired, user needs to re-authenticate")
+        raise HTTPException(
+            status_code=401,
+            detail="Databricks authentication expired. Please reconnect."
+        )
+    except DatabricksNotFoundError:
+        logger.warning(f"Table not found: {catalog}.{schema}.{table}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Table {catalog}.{schema}.{table} not found"
+        )
+    except DatabricksError as e:
+        logger.error(f"Databricks API error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to access Databricks workspace. Please try again later."
+        )
+```
+
+## Caching Strategy
+
+```python
+# Long-lived cache for metadata (5 minutes)
+# Short-lived cache for query results (1 minute)
+
+async def get_workspace_metadata() -> dict[str, Any]:
+    """Get cached workspace metadata."""
+    cache_key = "workspace_metadata"
+    
+    # Check cache
+    cached = await cache.get(cache_key)
+    if cached:
+        return cached
+    
+    # Fetch from Databricks
+    client = DatabricksClient(settings.databricks_client)
+    metadata = {
+        "catalogs": await client.list_catalogs(),
+    }
+    
+    # Cache for 5 minutes
+    await cache.set(cache_key, metadata, ttl=300)
+    return metadata
+```
+
+## Rate Limiting & Throttling
+
+Databricks has rate limits:
+- Personal workspace APIs: ~600 requests/min
+- SQL warehouse queries: Queue-based, check warehouse ID
+
+Implement:
+1. Exponential backoff for 429 (rate limit) responses
+2. Request queue limiting (max 10 concurrent Databricks calls)
+3. Cache metadata to reduce API calls
+4. Batch operations where possible
+
+## Testing Databricks Integration
+
+```python
+# tests/integration/test_databricks_integration.py
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from app.integrations.databricks_client import DatabricksClient, DatabricksError
+
+@pytest.fixture
+def mock_workspace_client():
+    """Mock Databricks workspace client."""
+    mock = MagicMock()
+    mock.catalogs.list.return_value = [
+        MagicMock(name="main", owner="admin", comment="Default catalog"),
+    ]
+    return mock
+
+@pytest.mark.asyncio
+async def test_list_catalogs(mock_workspace_client):
+    """Test listing catalogs with error handling."""
+    client = DatabricksClient(mock_workspace_client)
+    catalogs = await client.list_catalogs()
+    
+    assert len(catalogs) > 0
+    assert catalogs[0]["name"] == "main"
+    mock_workspace_client.catalogs.list.assert_called_once()
+```
+
+## Production Checklist
+
+- ✅ OAuth2 configured (not PATs)
+- ✅ Error translation (DatabricksError → HTTPException)
+- ✅ Caching for metadata (5 min TTL)
+- ✅ Exponential backoff for rate limits
+- ✅ Structured logging for all API calls
+- ✅ Token refresh mechanism (if using service accounts)
+- ✅ Lakebase connection pooling for PostgreSQL sync
+- ✅ Monitoring for API quota usage
