@@ -40,6 +40,7 @@ class ChatMessage(BaseModel):
     message: str
     conversation_id: str | None = None
     user_id: str | None = None
+    context: Dict[str, Any] | None = None  # Contexte additionnel (train, station, etc.)
 
 class ChatResponse(BaseModel):
     response: str
@@ -63,54 +64,104 @@ async def chat(chat_message: ChatMessage) -> ChatResponse:
     Endpoint pour le chatbot voyageur
     Envoie le message à l'Agent AI Databricks et retourne la réponse
     """
+    conversation_id = chat_message.conversation_id or f"conv-{datetime.now().timestamp()}"
     
-    # TODO: Appeler l'Agent AI réel via Databricks Model Serving
-    # Exemple d'appel à faire :
-    # 
-    # if AGENT_ENDPOINT_URL and DATABRICKS_TOKEN:
-    #     async with httpx.AsyncClient() as client:
-    #         headers = {
-    #             "Authorization": f"Bearer {DATABRICKS_TOKEN}",
-    #             "Content-Type": "application/json"
-    #         }
-    #         payload = {
-    #             "messages": [
-    #                 {
-    #                     "role": "user",
-    #                     "content": chat_message.message
-    #                 }
-    #             ]
-    #         }
-    #         response = await client.post(
-    #             AGENT_ENDPOINT_URL,
-    #             headers=headers,
-    #             json=payload,
-    #             timeout=30.0
-    #         )
-    #         response.raise_for_status()
-    #         agent_response = response.json()
-    #         return ChatResponse(
-    #             response=agent_response["choices"][0]["message"]["content"],
-    #             conversation_id=chat_message.conversation_id or "new-conv-id",
-    #             timestamp=datetime.now().isoformat()
-    #         )
+    # Vérifier si l'agent est configuré
+    if not AGENT_ENDPOINT_URL or not DATABRICKS_TOKEN:
+        print("⚠️ Agent non configuré - mode fallback")
+        return ChatResponse(
+            response="⚠️ L'agent AI n'est pas encore configuré. Veuillez configurer AGENT_ENDPOINT_URL et DATABRICKS_TOKEN.",
+            conversation_id=conversation_id,
+            timestamp=datetime.now().isoformat()
+        )
     
-    # Pour l'instant : réponse mock
-    mock_responses = [
-        "Votre prochain train est le TGV 6623 à 14h35 depuis Paris Montparnasse vers Bordeaux Saint-Jean. Arrivée prévue à 17h45.",
-        "Je peux vous aider avec les horaires, les réservations, ou les informations sur votre voyage. Que souhaitez-vous savoir ?",
-        "Votre train circule normalement, aucun retard n'est prévu pour le moment.",
-        "Pour commander un taxi à votre arrivée, je peux vous mettre en relation avec notre service G7. Souhaitez-vous réserver ?",
-    ]
-    
-    # Simulation de traitement
-    response_text = mock_responses[0] if "prochain" in chat_message.message.lower() else mock_responses[1]
-    
-    return ChatResponse(
-        response=response_text,
-        conversation_id=chat_message.conversation_id or f"conv-{datetime.now().timestamp()}",
-        timestamp=datetime.now().isoformat()
-    )
+    try:
+        # Préparer le contexte pour l'agent
+        context_info = ""
+        if chat_message.context:
+            context_info = f"\n\nContexte du voyage:\n"
+            if "train_number" in chat_message.context:
+                context_info += f"- Train: {chat_message.context['train_number']}\n"
+            if "departure_station" in chat_message.context:
+                context_info += f"- Gare de départ: {chat_message.context['departure_station']}\n"
+            if "departure_time" in chat_message.context:
+                context_info += f"- Heure de départ: {chat_message.context['departure_time']}\n"
+        
+        # Préparer le prompt complet
+        full_prompt = f"""Tu es un assistant de voyage SNCF. Aide l'utilisateur avec sa demande de manière claire, concise et utile.
+{context_info}
+Question: {chat_message.message}"""
+        
+        # Appeler l'agent Databricks
+        print(f"🤖 Calling Databricks Agent...")
+        print(f"📍 Endpoint: {AGENT_ENDPOINT_URL}")
+        print(f"📝 Message: {chat_message.message[:100]}...")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            headers = {
+                "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": full_prompt
+                    }
+                ]
+            }
+            
+            response = await client.post(
+                AGENT_ENDPOINT_URL,
+                headers=headers,
+                json=payload
+            )
+            
+            response.raise_for_status()
+            agent_data = response.json()
+            
+            # Extraire la réponse selon le format de l'agent
+            if "choices" in agent_data and len(agent_data["choices"]) > 0:
+                # Format OpenAI/Agent compatible
+                agent_response = agent_data["choices"][0]["message"]["content"]
+            elif "predictions" in agent_data:
+                # Format Databricks Model Serving
+                agent_response = agent_data["predictions"][0]
+            elif "response" in agent_data:
+                # Format direct
+                agent_response = agent_data["response"]
+            else:
+                # Fallback
+                agent_response = str(agent_data)
+            
+            print(f"✅ Agent response: {len(agent_response)} chars")
+            
+            return ChatResponse(
+                response=agent_response,
+                conversation_id=conversation_id,
+                timestamp=datetime.now().isoformat()
+            )
+            
+    except httpx.TimeoutException:
+        print("⏱️ Timeout calling agent")
+        raise HTTPException(
+            status_code=504,
+            detail="L'agent AI a mis trop de temps à répondre. Veuillez réessayer."
+        )
+    except httpx.HTTPStatusError as e:
+        print(f"❌ HTTP error: {e.response.status_code}")
+        print(f"Response: {e.response.text}")
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"Erreur de l'agent AI: {e.response.text}"
+        )
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de l'appel à l'agent: {str(e)}"
+        )
 
 @app.get("/api/trips")
 async def get_trips():

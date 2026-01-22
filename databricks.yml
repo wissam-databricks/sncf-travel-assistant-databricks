@@ -35,7 +35,7 @@ resources:
         
         env:
           - name: AGENT_ENDPOINT_URL
-            value: "https://${workspace.host}/serving-endpoints/sncf-travel-agent/invocations"
+            value: "https://${workspace.host}/serving-endpoints/agents_sncf_prod-travel_assistant-sncf-travel-agent/invocations"
           
           - name: DATABRICKS_TOKEN
             value: "{{secrets/sncf-travel-app/databricks-token}}"
@@ -133,10 +133,16 @@ targets:
         sncf_travel_app:
           name: "sncf-travel-assistant-dev"
           description: "[DEV] Application SNCF Travel Assistant"
+          
+          # Configuration spécifique pour l'environnement dev
+          config:
+            env:
+              - name: AGENT_ENDPOINT_URL
+                value: "https://${workspace.host}/serving-endpoints/agents_sncf_prod-travel_assistant-sncf-travel-agent/invocations"
       
       # model_serving_endpoints:
       #   sncf_travel_agent:
-      #     name: "sncf-travel-agent-dev"
+      #     name: "agents_sncf_prod-travel_assistant-sncf-travel-agent"
   
   # Environnement de staging
   staging:
