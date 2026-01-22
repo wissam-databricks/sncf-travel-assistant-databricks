@@ -30,15 +30,15 @@ databricks configure --token
 ```yaml
 # Ligne ~82 (section dev)
 workspace:
-  host: https://VOTRE-WORKSPACE.cloud.databricks.com  # ← MODIFIER ICI
+  host: https://adb-984752964297111.11.azuredatabricks.net/ # ← MODIFIER ICI
 
 # Ligne ~98 (section staging)  
 workspace:
-  host: https://VOTRE-WORKSPACE.cloud.databricks.com  # ← MODIFIER ICI
+  host: https://adb-984752964297111.11.azuredatabricks.net/  # ← MODIFIER ICI
 
 # Ligne ~124 (section prod)
 workspace:
-  host: https://VOTRE-WORKSPACE.cloud.databricks.com  # ← MODIFIER ICI
+  host: https://adb-984752964297111.11.azuredatabricks.net/  # ← MODIFIER ICI
 ```
 
 **Optionnel** - Adapter les variables selon vos besoins :

@@ -56,56 +56,58 @@ resources:
             permission: CAN_QUERY
   
   # Model Serving Endpoint (si vous déployez l'agent via le bundle)
-  model_serving_endpoints:
-    sncf_travel_agent:
-      name: "sncf-travel-agent"
-      config:
-        served_entities:
-          - name: "travel_agent_model"
-            entity_name: "${var.catalog}.${var.schema}.sncf_agent"
-            entity_version: "1"
-            workload_size: "Small"
-            scale_to_zero_enabled: true
-        
-        # Configuration du traffic routing
-        traffic_config:
-          routes:
-            - served_model_name: "travel_agent_model"
-              traffic_percentage: 100
+  # Commenté pour l'instant - à décommenter une fois le modèle prêt
+  # model_serving_endpoints:
+  #   sncf_travel_agent:
+  #     name: "sncf-travel-agent"
+  #     config:
+  #       served_entities:
+  #         - name: "travel_agent_model"
+  #           entity_name: "${var.catalog}.${var.schema}.sncf_agent"
+  #           entity_version: "1"
+  #           workload_size: "Small"
+  #           scale_to_zero_enabled: true
+  #       
+  #       # Configuration du traffic routing
+  #       traffic_config:
+  #         routes:
+  #           - served_model_name: "travel_agent_model"
+  #             traffic_percentage: 100
   
   # Jobs (optionnel - pour pipeline de données, training, etc.)
-  jobs:
-    # Exemple : job pour calculer les analytics quotidiennes
-    analytics_pipeline:
-      name: "sncf-analytics-daily"
-      
-      tasks:
-        - task_key: "compute_kpis"
-          notebook_task:
-            notebook_path: "./notebooks/compute_daily_kpis.py"
-            source: WORKSPACE
-          
-          new_cluster:
-            spark_version: "14.3.x-scala2.12"
-            node_type_id: "i3.xlarge"
-            num_workers: 2
-        
-        - task_key: "update_dashboard"
-          depends_on:
-            - task_key: "compute_kpis"
-          
-          notebook_task:
-            notebook_path: "./notebooks/update_dashboard_data.py"
-            source: WORKSPACE
-          
-          new_cluster:
-            spark_version: "14.3.x-scala2.12"
-            node_type_id: "i3.xlarge"
-            num_workers: 1
-      
-      schedule:
-        quartz_cron_expression: "0 0 2 * * ?"  # Tous les jours à 2h du matin
-        timezone_id: "Europe/Paris"
+  # Commenté pour l'instant - à décommenter une fois les notebooks créés
+  # jobs:
+  #   # Exemple : job pour calculer les analytics quotidiennes
+  #   analytics_pipeline:
+  #     name: "sncf-analytics-daily"
+  #     
+  #     tasks:
+  #       - task_key: "compute_kpis"
+  #         notebook_task:
+  #           notebook_path: "./notebooks/compute_daily_kpis.py"
+  #           source: WORKSPACE
+  #         
+  #         new_cluster:
+  #           spark_version: "14.3.x-scala2.12"
+  #           node_type_id: "i3.xlarge"
+  #           num_workers: 2
+  #       
+  #       - task_key: "update_dashboard"
+  #         depends_on:
+  #           - task_key: "compute_kpis"
+  #         
+  #         notebook_task:
+  #           notebook_path: "./notebooks/update_dashboard_data.py"
+  #           source: WORKSPACE
+  #         
+  #         new_cluster:
+  #           spark_version: "14.3.x-scala2.12"
+  #           node_type_id: "i3.xlarge"
+  #           num_workers: 1
+  #     
+  #     schedule:
+  #       quartz_cron_expression: "0 0 2 * * ?"  # Tous les jours à 2h du matin
+  #       timezone_id: "Europe/Paris"
 
 # Targets (environnements de déploiement)
 targets:
@@ -114,7 +116,7 @@ targets:
     mode: development
     
     workspace:
-      host: https://<workspace-url>.cloud.databricks.com
+      host: https://adb-984752964297111.11.azuredatabricks.net
       # Option 1: Authentification utilisateur
       # current_user:
       #   user_name: user@example.com
@@ -132,16 +134,16 @@ targets:
           name: "sncf-travel-assistant-dev"
           description: "[DEV] Application SNCF Travel Assistant"
       
-      model_serving_endpoints:
-        sncf_travel_agent:
-          name: "sncf-travel-agent-dev"
+      # model_serving_endpoints:
+      #   sncf_travel_agent:
+      #     name: "sncf-travel-agent-dev"
   
   # Environnement de staging
   staging:
     mode: production
     
     workspace:
-      host: https://<workspace-url>.cloud.databricks.com
+      host: https://adb-984752964297111.11.azuredatabricks.net
       # Utiliser un service principal pour staging/prod
       # root_path: /Workspace/.bundle/${bundle.name}/${bundle.target}
     
@@ -160,19 +162,19 @@ targets:
               - name: AGENT_ENDPOINT_URL
                 value: "https://${workspace.host}/serving-endpoints/sncf-travel-agent-staging/invocations"
       
-      model_serving_endpoints:
-        sncf_travel_agent:
-          name: "sncf-travel-agent-staging"
-          config:
-            served_entities:
-              - workload_size: "Medium"  # Plus de ressources en staging
+      # model_serving_endpoints:
+      #   sncf_travel_agent:
+      #     name: "sncf-travel-agent-staging"
+      #     config:
+      #       served_entities:
+      #         - workload_size: "Medium"  # Plus de ressources en staging
   
   # Environnement de production
   prod:
     mode: production
     
     workspace:
-      host: https://<workspace-url>.cloud.databricks.com
+      host: https://adb-984752964297111.11.azuredatabricks.net
       # Service principal obligatoire en production
       # root_path: /Workspace/.bundle/${bundle.name}/${bundle.target}
     
@@ -190,16 +192,16 @@ targets:
               - name: AGENT_ENDPOINT_URL
                 value: "https://${workspace.host}/serving-endpoints/sncf-travel-agent-prod/invocations"
       
-      model_serving_endpoints:
-        sncf_travel_agent:
-          name: "sncf-travel-agent-prod"
-          config:
-            served_entities:
-              - workload_size: "Large"  # Ressources maximales en production
-                scale_to_zero_enabled: false  # Toujours actif en prod
+      # model_serving_endpoints:
+      #   sncf_travel_agent:
+      #     name: "sncf-travel-agent-prod"
+      #     config:
+      #       served_entities:
+      #         - workload_size: "Large"  # Ressources maximales en production
+      #           scale_to_zero_enabled: false  # Toujours actif en prod
       
-      jobs:
-        analytics_pipeline:
-          # Job tournant plus fréquemment en prod
-          schedule:
-            quartz_cron_expression: "0 0 * * * ?"  # Toutes les heures
+      # jobs:
+      #   analytics_pipeline:
+      #     # Job tournant plus fréquemment en prod
+      #     schedule:
+      #       quartz_cron_expression: "0 0 * * * ?"  # Toutes les heures

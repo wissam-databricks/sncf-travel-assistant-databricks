@@ -33,6 +33,12 @@ wheels/
 *.tfstate.backup
 .terraform/
 
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/node_modules/
+frontend/.turbo/
+
 # IDEs
 .vscode/
 .idea/
