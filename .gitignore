@@ -35,7 +35,7 @@ wheels/
 
 # Next.js
 frontend/.next/
-frontend/out/
+# frontend/out/  # IMPORTANT: Ne pas ignorer pour Databricks deployment!
 frontend/node_modules/
 frontend/.turbo/
 
